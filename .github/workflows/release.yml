@@ -34,17 +34,18 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
+        shell: cmd
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller cryptography argon2-cffi psutil
 
       - name: Run tests
+        shell: cmd
         run: python test_context_menu.py
 
       - name: Build locker.exe
-        run: >
-          pyinstaller --onefile --noconsole --icon locker.ico --name locker
-          --add-data "locker.ico;." locker.py
+        shell: cmd
+        run: python -m PyInstaller --onefile --noconsole --icon locker.ico --name locker --add-data "locker.ico;." locker.py --noconfirm
 
       - name: Compute SHA-256 checksum
         shell: pwsh
