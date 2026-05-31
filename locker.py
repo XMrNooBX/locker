@@ -91,7 +91,7 @@ REG_MENU_LABEL = "Locker"
 # tool appears in Settings → Apps with a working Uninstall button (per-user, no
 # admin).  HKCU\…\Uninstall\FolderLocker
 REG_UNINSTALL  = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\FolderLocker"
-APP_VERSION    = "1.0.1"
+APP_VERSION    = "1.0.2"
 
 # Argon2id — OWASP-compliant, lighter than v1 params (~2× faster)
 ARGON2_TIME_COST   = 2
@@ -1015,19 +1015,32 @@ def apply_unlock_fs(p: Path) -> None:
 
 # ── Daemon helpers ────────────────────────────────────────────────────────────
 
-def _self_invocation() -> list[str]:
+def _is_packaged() -> bool:
     """
-    Return the command prefix needed to re-invoke this tool.
-
-    Frozen (PyInstaller exe):  [<exe>]                    → ["C:\\...\\locker.exe"]
-    From source (.py):         [<python>, <script>]       → ["python.exe", "locker.py"]
-
-    Used by both the daemon spawner and the registry command builder so the
-    tool works identically whether run as a compiled exe or a plain script.
+    True when running as a packaged executable — either PyInstaller (sets
+    sys.frozen) or Nuitka (sets the module global __compiled__).  Nuitka does
+    NOT set sys.frozen, which is why we check both.
     """
-    if getattr(sys, "frozen", False):
-        return [sys.executable]
-    return [sys.executable, os.path.abspath(__file__)]
+    return getattr(sys, "frozen", False) or "__compiled__" in globals()
+
+
+def _real_exe() -> str:
+    """
+    The path to the actual on-disk executable that the user launched.
+
+    With Nuitka --onefile, sys.executable points INSIDE a temporary extraction
+    folder that is deleted when the process exits, so it must NOT be written to
+    the registry.  sys.argv[0] holds the real launcher path for both Nuitka and
+    PyInstaller; fall back to sys.executable only if argv[0] looks unusable.
+    """
+    argv0 = sys.argv[0] if sys.argv else ""
+    try:
+        if argv0 and os.path.isabs(argv0) and argv0.lower().endswith(".exe") \
+                and os.path.exists(argv0):
+            return argv0
+    except Exception:
+        pass
+    return sys.executable
 
 
 def daemon_running() -> bool:
@@ -1049,10 +1062,13 @@ def daemon_running() -> bool:
 def ensure_daemon() -> None:
     if daemon_running():
         return
-    if getattr(sys, "frozen", False):
-        # Frozen exe: there is no pythonw; relaunch the exe itself with --daemon.
-        # CREATE_NO_WINDOW keeps the (windowed) process hidden.
-        cmd = [sys.executable, "--daemon"]
+    if _is_packaged():
+        # Packaged exe: relaunch the installed copy with --daemon.  Prefer the
+        # stable installed exe (the running one may be a temp Nuitka extraction
+        # that vanishes on exit).  CREATE_NO_WINDOW keeps the windowed process
+        # hidden.
+        exe = str(INSTALL_EXE) if INSTALL_EXE.exists() else _real_exe()
+        cmd = [exe, "--daemon"]
     else:
         # From source: prefer pythonw.exe so no console window flashes.
         pythonw = Path(sys.executable).with_name("pythonw.exe")
@@ -1218,7 +1234,8 @@ def _icon_path() -> Optional[str]:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         candidates.append(Path(meipass) / "locker.ico")
-    if getattr(sys, "frozen", False):
+    if _is_packaged():
+        candidates.append(Path(_real_exe()).parent / "locker.ico")
         candidates.append(Path(sys.executable).parent / "locker.ico")
     else:
         candidates.append(Path(os.path.abspath(__file__)).parent / "locker.ico")
@@ -1394,32 +1411,45 @@ def _make_root(title: str, width: int, height: int, accent: str = None):
 
 def _run_modal(win) -> None:
     """
-    Run a Toplevel modally: keep it above the window that opened it, grab input,
-    and wait until it's destroyed.  Replaces nested mainloop() calls, which
-    break when multiple windows exist.
+    Run a Toplevel modally and block until it closes.
+
+    Two cases:
+      • A visible parent window is already running its own mainloop (e.g. the
+        Manager): use wait_window(), which nests cleanly.
+      • No outer mainloop is running (a one-shot `lock --gui` command): drive
+        the shared root's mainloop() and quit() it when this window closes.
+        wait_window() alone is unreliable as the first/only window in a frozen
+        (Nuitka) exe — it can return immediately, making the dialog flash.
     """
-    # Sit above whatever visible window opened this dialog (e.g. the Manager),
-    # not the hidden root — otherwise the dialog falls behind and looks frozen.
-    parent = _ACTIVE_PARENT if (_ACTIVE_PARENT is not None
-                                and _win_alive(_ACTIVE_PARENT)) else _get_root()
+    root = _get_root()
+    has_parent = (_ACTIVE_PARENT is not None and _win_alive(_ACTIVE_PARENT)
+                  and _ACTIVE_PARENT is not root)
+    parent = _ACTIVE_PARENT if has_parent else root
     try:
         win.transient(parent)
     except Exception:
         pass
     try:
+        win.update_idletasks()
+        win.deiconify()
         win.lift()
         win.attributes("-topmost", True)
         win.focus_force()
-    except Exception:
-        pass
-    try:
         win.grab_set()
+        win.after(300, lambda: _win_alive(win)
+                  and win.attributes("-topmost", False))
     except Exception:
         pass
-    win.wait_window()
-    # Hand focus back to the parent so it doesn't get buried.
+
+    if has_parent:
+        win.wait_window()
+    else:
+        # No ambient loop — run one and stop it when the window is destroyed.
+        win.bind("<Destroy>",
+                 lambda e: e.widget is win and root.quit(), add="+")
+        root.mainloop()
     try:
-        if _win_alive(parent):
+        if _win_alive(parent) and parent is not root:
             parent.lift()
             parent.focus_force()
     except Exception:
@@ -1635,7 +1665,7 @@ class RecoverDialog:
         accent = _THEME["warning"]
         self.tk, self.ttk, self.root, _ = _make_root(
             "Reset Password", 460, 430, accent)
-        tk, ttk = self.tk, self.ttk
+        ttk = self.ttk
         self.result = None
         self._show = False
 
@@ -1800,7 +1830,7 @@ class MessageDialog:
     def __init__(self, kind: str, title: str, text: str):
         icon, accent = self._KINDS.get(kind, ("ℹ", _THEME["accent"]))
         self.tk, self.ttk, self.root, _ = _make_root(title, 440, 230, accent)
-        tk, ttk = self.tk, self.ttk
+        ttk = self.ttk
         self.answer = False
 
         _header(self.root, ttk, icon, title, "", accent)
@@ -1868,7 +1898,7 @@ class ProgressDialog:
                  label: str, colour: str):
         accent = _THEME["accent"] if label.startswith("Encrypt") else _THEME["success"]
         self.tk, self.ttk, self.root, _ = _make_root("FolderLocker", 440, 200, accent)
-        tk, ttk = self.tk, self.ttk
+        ttk = self.ttk
         self.total_files = total_files
         self.total_bytes = max(total_bytes, 1)
         self._fdone = 0
@@ -2595,12 +2625,12 @@ def _menu_commands() -> dict[str, str]:
     Each invokes the tool with the subcommand, --gui, and the clicked folder
     path ("%1") quoted so paths with spaces survive.
 
-    When frozen the installed (windowed) exe is used.  From source we use
-    pythonw.exe — the GUI/windowless Python — so launching a menu item does NOT
-    pop up a console (cmd) window.  Falls back to python.exe if pythonw is
-    missing for some reason.
+    When packaged the installed (windowed) exe at INSTALL_EXE is used — never
+    sys.executable, which under Nuitka --onefile points at a temp folder that
+    is deleted on exit.  From source we use pythonw.exe (windowless) so a menu
+    click doesn't pop a console; falls back to python.exe if pythonw is missing.
     """
-    if getattr(sys, "frozen", False):
+    if _is_packaged():
         prefix = f'"{INSTALL_EXE}"'
     else:
         pythonw = Path(sys.executable).with_name("pythonw.exe")
@@ -2637,6 +2667,62 @@ def _reg_delete_tree(root, subkey: str) -> None:
         winreg.DeleteKey(root, subkey)
     except FileNotFoundError:
         pass
+
+
+def _first_run_gui() -> None:
+    """
+    First-run window shown when the (frozen) exe is double-clicked and the tool
+    isn't installed yet.  Uses a real window + mainloop (the pattern proven to
+    work reliably in the frozen exe), rather than a transient modal dialog which
+    can flash-and-vanish as the very first window in a windowed exe.
+
+    If the user clicks Install, runs the installer and shows the result.
+    """
+    tk, ttk, root, style = _make_root("FolderLocker", 460, 300)
+    global _ACTIVE_PARENT
+    _ACTIVE_PARENT = root
+
+    _header(root, ttk, "🔒", "FolderLocker",
+            "Lock folders with a password — from the right-click menu")
+
+    body = ttk.Frame(root, style="TFrame")
+    body.pack(fill="both", expand=True, padx=24, pady=(8, 20))
+
+    ttk.Label(
+        body, wraplength=400, justify="left", style="TLabel",
+        text=("FolderLocker isn't installed yet.\n\n"
+              "Installing adds a \"Locker\" submenu when you right-click any "
+              "folder, plus a Manager in your Start Menu. No administrator "
+              "rights are needed, and you can remove it anytime from "
+              "Settings → Apps."),
+    ).pack(anchor="w", pady=(4, 0))
+
+    status = ttk.Label(body, text="", style="Muted.TLabel", wraplength=400)
+    status.pack(anchor="w", pady=(10, 0))
+
+    def do_it():
+        status.config(text="Installing…")
+        root.update_idletasks()
+        try:
+            do_install(GuiUx())
+        except AbortAction:
+            pass
+        root.destroy()
+
+    btns = ttk.Frame(body, style="TFrame")
+    btns.pack(side="bottom", fill="x", pady=(16, 0))
+    _button(btns, "Install", do_it, kind="accent").pack(side="right")
+    _button(btns, "Not now", root.destroy, kind="ghost").pack(
+        side="right", padx=(0, 8))
+
+    parent = _get_root()
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    root.bind("<Destroy>", lambda e: parent.quit() if e.widget is root else None)
+    root.lift()
+    root.attributes("-topmost", True)
+    root.after(400, lambda: _win_alive(root) and root.attributes("-topmost", False))
+    root.focus_force()
+    parent.mainloop()
 
 
 def _menu_installed() -> bool:
@@ -2716,13 +2802,16 @@ def do_install(ux: UxContext) -> None:
     import winreg
     check_preconditions(ux)
 
-    frozen = getattr(sys, "frozen", False)
+    packaged = _is_packaged()
 
-    # 1. Copy the executable to the stable install location (frozen only).
-    if frozen:
+    # 1. Copy the executable to the stable install location (packaged only).
+    #    Under Nuitka --onefile the running binary is the launcher exe exposed
+    #    via _real_exe(); sys.executable points at a temp folder, so use the
+    #    real path.
+    if packaged:
         try:
             INSTALL_DIR.mkdir(parents=True, exist_ok=True)
-            src = Path(sys.executable).resolve()
+            src = Path(_real_exe()).resolve()
             if src != INSTALL_EXE.resolve():
                 shutil.copy2(src, INSTALL_EXE)   # overwrite → update
         except Exception as exc:
@@ -2749,7 +2838,7 @@ def do_install(ux: UxContext) -> None:
             winreg.SetValueEx(root, "MUIVerb", 0, winreg.REG_SZ, REG_MENU_LABEL)
             winreg.SetValueEx(root, "ExtendedSubCommandsKey", 0, winreg.REG_SZ,
                               r"Directory\shell\Locker")
-            icon = str(INSTALL_EXE) if frozen else ""
+            icon = str(INSTALL_EXE) if packaged else ""
             if icon:
                 winreg.SetValueEx(root, "Icon", 0, winreg.REG_SZ, icon)
         for key, label in _MENU_ITEMS:
@@ -2776,7 +2865,7 @@ def do_install(ux: UxContext) -> None:
         "Right-click any folder → Locker → Lock / Lock & Hide / Unlock / Fully Unlock.",
         "To remove it later: Settings → Apps → FolderLocker → Uninstall.",
     ]
-    if frozen:
+    if packaged:
         lines.append(f"Installed to: {INSTALL_EXE}")
     if not shortcut_ok:
         lines.append("(Start Menu shortcut could not be created — use the menu instead.)")
@@ -2841,18 +2930,38 @@ def do_uninstall(ux: UxContext) -> None:
         except Exception as exc:
             failures.append(f"shortcut: {exc}")
 
-    # 4. Remove the installed copy (unless it is the running exe).
+    # 4. Remove the installed copy.  If it's the exe currently running, Windows
+    #    won't let us delete it outright — schedule a best-effort delayed delete
+    #    and fall back to telling the user.
     manual_note = None
     if had_copy:
-        running = getattr(sys, "frozen", False) and \
-            Path(sys.executable).resolve() == INSTALL_EXE.resolve()
-        if running:
-            manual_note = f"Delete the installed copy manually: {INSTALL_EXE}"
-        else:
-            try:
-                INSTALL_EXE.unlink()
-            except Exception as exc:
-                failures.append(f"installed copy: {exc}")
+        try:
+            running_self = Path(_real_exe()).resolve() == INSTALL_EXE.resolve()
+        except Exception:
+            running_self = False
+        deleted = False
+        try:
+            INSTALL_EXE.unlink()
+            deleted = True
+        except Exception:
+            deleted = False
+        if not deleted:
+            if running_self:
+                # Schedule deletion of the running exe after it exits via a
+                # detached cmd that waits, then removes the install dir.
+                try:
+                    subprocess.Popen(
+                        ["cmd", "/c", "ping 127.0.0.1 -n 3 >nul & "
+                         f'rmdir /s /q "{INSTALL_DIR}"'],
+                        creationflags=subprocess.DETACHED_PROCESS
+                        | subprocess.CREATE_NO_WINDOW,
+                        close_fds=True,
+                    )
+                    deleted = True   # will be gone shortly after we exit
+                except Exception:
+                    manual_note = f"Delete the installed copy manually: {INSTALL_EXE}"
+            else:
+                failures.append(f"installed copy: could not delete {INSTALL_EXE}")
 
     if failures:
         ux.error("Uninstall completed with problems:\n  " + "\n  ".join(failures))
@@ -3190,16 +3299,12 @@ Install dependencies (running from source):
             if not sys.platform.startswith("win"):
                 die("locker only works on Windows.")
             if _menu_installed():
-                cmd_manage(GuiUx() if (is_gui or _has_display()) else ConsoleUx())
+                # Already installed → open the Manager.
+                cmd_manage(GuiUx())
             else:
-                gx = GuiUx()
-                if MessageDialog.ask_yes_no(
-                    "FolderLocker is not installed.\n\n"
-                    "Install the right-click menu and manager now? "
-                    "(no admin required)",
-                    "Install FolderLocker?",
-                ):
-                    do_install(gx)
+                # Not installed → show the first-run install window (a real
+                # window with its own mainloop; reliable in the frozen exe).
+                _first_run_gui()
             return
 
         # All real actions share the precondition checks.
@@ -3236,4 +3341,18 @@ def _has_display() -> bool:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:
+        # Last-resort crash log so a windowed (no-console) exe failure is
+        # diagnosable instead of vanishing silently.
+        try:
+            import traceback as _tb
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+            with open(APP_DIR / "crash.log", "a", encoding="utf-8") as _fh:
+                _fh.write(_tb.format_exc() + "\n")
+        except Exception:
+            pass
+        raise

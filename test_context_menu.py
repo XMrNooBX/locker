@@ -23,25 +23,23 @@ def check(name, cond):
     print(("  [PASS] " if cond else "  [FAIL] ") + name)
 
 
-# ── 1. _self_invocation: frozen vs source ─────────────────────────────────────
-def test_self_invocation():
+# ── 1. packaging detection: _is_packaged / _real_exe ──────────────────────────
+def test_packaging_helpers():
+    # Running from source (.py) → not packaged.
     orig_frozen = getattr(sys, "frozen", False)
     try:
         if hasattr(sys, "frozen"):
             del sys.frozen
-        inv = locker._self_invocation()
-        check("self_invocation source = [python, script]",
-              len(inv) == 2 and inv[0] == sys.executable and inv[1].endswith("locker.py"))
-
-        sys.frozen = True
-        inv2 = locker._self_invocation()
-        check("self_invocation frozen = [exe]",
-              len(inv2) == 1 and inv2[0] == sys.executable)
+        check("_is_packaged() False when run from source",
+              locker._is_packaged() is False)
     finally:
         if orig_frozen:
             sys.frozen = True
-        elif hasattr(sys, "frozen"):
-            del sys.frozen
+
+    # _real_exe falls back to sys.executable when argv[0] isn't a real .exe
+    # (which is the case when running under the Python interpreter).
+    exe = locker._real_exe()
+    check("_real_exe returns a non-empty path", isinstance(exe, str) and bool(exe))
 
 
 # ── 2. menu command builder ───────────────────────────────────────────────────
@@ -562,7 +560,7 @@ def test_uninstall_locked_warning():
 
 if __name__ == "__main__":
     print("Running headless context-menu tests...\n")
-    test_self_invocation()
+    test_packaging_helpers()
     test_menu_commands()
     test_hidden_marker()
     test_password()

@@ -5,7 +5,23 @@ All notable changes to FolderLocker are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
-## [1.0.1] — Unreleased
+## [1.0.2] — Unreleased
+
+Bug-fix release: makes the packaged (Nuitka) build actually work end-to-end.
+
+### Fixed
+- **Right-click menu actions did nothing after installing the packaged exe.**
+  Nuitka does not set `sys.frozen`, so install never copied the exe and the menu
+  pointed at a temporary extraction folder that is deleted on exit. Packaging is
+  now detected for both Nuitka and PyInstaller, and the menu/daemon use the
+  stable installed copy.
+- **Password and other dialogs flashed and vanished in the packaged exe.**
+  One-shot GUI commands now run a real event loop instead of relying on
+  `wait_window()`, which was unreliable as the first window in a windowed exe.
+- **Double-clicking the exe to install showed a dialog that flashed away.**
+  First-run now opens a proper install window.
+
+## [1.0.1]
 
 Bug-fix release focused on the GUI Manager and uninstall flow.
 
@@ -57,5 +73,6 @@ First public release.
 - Documented threat model: protects data at rest; does **not** protect against
   an admin/malware on a live account while a folder is unlocked.
 
+[1.0.2]: https://github.com/XMrNooBX/locker/releases/tag/v1.0.2
 [1.0.1]: https://github.com/XMrNooBX/locker/releases/tag/v1.0.1
 [1.0.0]: https://github.com/XMrNooBX/locker/releases/tag/v1.0.0

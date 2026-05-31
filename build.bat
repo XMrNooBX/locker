@@ -22,8 +22,8 @@ python -m nuitka ^
     --include-data-files=locker.ico=locker.ico ^
     --company-name=FolderLocker ^
     --product-name=FolderLocker ^
-    --file-version=1.0.1 ^
-    --product-version=1.0.1 ^
+    --file-version=1.0.2 ^
+    --product-version=1.0.2 ^
     --file-description="FolderLocker - encrypt and lock folders" ^
     --assume-yes-for-downloads ^
     --output-filename=locker.exe ^
