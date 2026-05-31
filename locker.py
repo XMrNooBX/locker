@@ -91,7 +91,7 @@ REG_MENU_LABEL = "Locker"
 # tool appears in Settings → Apps with a working Uninstall button (per-user, no
 # admin).  HKCU\…\Uninstall\FolderLocker
 REG_UNINSTALL  = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\FolderLocker"
-APP_VERSION    = "1.0.0"
+APP_VERSION    = "1.0.1"
 
 # Argon2id — OWASP-compliant, lighter than v1 params (~2× faster)
 ARGON2_TIME_COST   = 2
@@ -1266,30 +1266,42 @@ def _accent_text(hex_accent: str) -> str:
     return "#11131c" if luminance > 0.6 else "#ffffff"
 
 
-def _make_root(title: str, width: int, height: int, accent: str = None):
-    """
-    Create a themed, centered Tk root with the given size.
-    Returns (tk, ttk, root, style).
-    """
-    tk, ttk = _tk()
-    root = tk.Tk()
-    root.title(title)
-    root.configure(bg=_THEME["bg"])
-    root.resizable(False, False)
-    ico = _icon_path()
-    if ico:
-        try:
-            root.iconbitmap(ico)
-        except Exception:
-            pass
+_TK_ROOT = None   # single hidden Tk root; all windows are Toplevels of it
+_ACTIVE_PARENT = None   # the most recent visible window, so dialogs sit above it
 
-    style = ttk.Style(root)
+
+def _get_root():
+    """
+    Return the one shared, hidden Tk root, creating it on first use.
+
+    tkinter only supports a single Tk() per process; creating extra Tk() roots
+    (e.g. a dialog opened from the Manager) causes event-loop conflicts that
+    silently break operations.  Every window is therefore a Toplevel of this
+    one hidden root, and dialogs run modally via wait_window() rather than
+    nested mainloop() calls.
+    """
+    global _TK_ROOT
+    tk, ttk = _tk()
+    if _TK_ROOT is None or not _TK_ROOT.winfo_exists():
+        _TK_ROOT = tk.Tk()
+        _TK_ROOT.withdraw()                 # never shown
+        ico = _icon_path()
+        if ico:
+            try:
+                _TK_ROOT.iconbitmap(ico)
+            except Exception:
+                pass
+        _apply_theme(ttk.Style(_TK_ROOT))
+    return _TK_ROOT
+
+
+def _apply_theme(style) -> None:
+    """Configure the ttk 'clam' theme with our colours (idempotent)."""
     try:
         style.theme_use("clam")
     except Exception:
         pass
-    accent = accent or _THEME["accent"]
-
+    accent = _THEME["accent"]
     style.configure(".", background=_THEME["bg"], foreground=_THEME["text"],
                     font=_FONT_BODY, borderwidth=0)
     style.configure("TFrame", background=_THEME["bg"])
@@ -1307,8 +1319,6 @@ def _make_root(title: str, width: int, height: int, accent: str = None):
                     foreground=_THEME["muted"], font=_FONT_SM)
     style.configure("H2.TLabel", background=_THEME["bg"], foreground=_THEME["muted"],
                     font=_FONT_H2)
-
-    # Entry
     style.configure("TEntry", fieldbackground=_THEME["field"],
                     foreground=_THEME["text"], bordercolor=_THEME["border"],
                     lightcolor=_THEME["border"], darkcolor=_THEME["border"],
@@ -1317,6 +1327,36 @@ def _make_root(title: str, width: int, height: int, accent: str = None):
               bordercolor=[("focus", accent)],
               lightcolor=[("focus", accent)],
               darkcolor=[("focus", accent)])
+
+
+def _make_root(title: str, width: int, height: int, accent: str = None):
+    """
+    Create a themed, centered window (a Toplevel of the shared hidden root).
+    The returned object behaves like a Tk root for our purposes (title, bind,
+    protocol, destroy, geometry, etc.).  Returns (tk, ttk, win, style).
+    """
+    tk, ttk = _tk()
+    parent = _get_root()
+    root = tk.Toplevel(parent)
+    root.title(title)
+    root.configure(bg=_THEME["bg"])
+    root.resizable(False, False)
+    ico = _icon_path()
+    if ico:
+        try:
+            root.iconbitmap(ico)
+        except Exception:
+            pass
+
+    style = ttk.Style(root)
+    _apply_theme(style)
+    accent = accent or _THEME["accent"]
+    # Per-window focus accent for entries.
+    style.map("TEntry",
+              bordercolor=[("focus", accent)],
+              lightcolor=[("focus", accent)],
+              darkcolor=[("focus", accent)])
+
 
     # Checkbutton
     style.configure("TCheckbutton", background=_THEME["bg"],
@@ -1347,9 +1387,50 @@ def _make_root(title: str, width: int, height: int, accent: str = None):
     x = (sw - width) // 2
     y = (sh - height) // 3
     root.geometry(f"{width}x{height}+{x}+{y}")
-    root.attributes("-topmost", True)
-    root.after(250, lambda: root.attributes("-topmost", False))
+    # Topmost/focus is managed by _run_modal for dialogs and by the Manager
+    # itself; don't force it here (it caused dialogs to flash and fall behind).
     return tk, ttk, root, style
+
+
+def _run_modal(win) -> None:
+    """
+    Run a Toplevel modally: keep it above the window that opened it, grab input,
+    and wait until it's destroyed.  Replaces nested mainloop() calls, which
+    break when multiple windows exist.
+    """
+    # Sit above whatever visible window opened this dialog (e.g. the Manager),
+    # not the hidden root — otherwise the dialog falls behind and looks frozen.
+    parent = _ACTIVE_PARENT if (_ACTIVE_PARENT is not None
+                                and _win_alive(_ACTIVE_PARENT)) else _get_root()
+    try:
+        win.transient(parent)
+    except Exception:
+        pass
+    try:
+        win.lift()
+        win.attributes("-topmost", True)
+        win.focus_force()
+    except Exception:
+        pass
+    try:
+        win.grab_set()
+    except Exception:
+        pass
+    win.wait_window()
+    # Hand focus back to the parent so it doesn't get buried.
+    try:
+        if _win_alive(parent):
+            parent.lift()
+            parent.focus_force()
+    except Exception:
+        pass
+
+
+def _win_alive(win) -> bool:
+    try:
+        return bool(win.winfo_exists())
+    except Exception:
+        return False
 
 
 def _header(parent, ttk, icon: str, title: str, subtitle: str = "",
@@ -1535,7 +1616,7 @@ class PasswordDialog:
         self.root.destroy()
 
     def _run(self):
-        self.root.mainloop()
+        _run_modal(self.root)
 
     @classmethod
     def ask(cls, folder_name: str, confirm: bool, verb: str = "Lock") -> Optional[str]:
@@ -1626,7 +1707,7 @@ class RecoverDialog:
         self.root.destroy()
 
     def _run(self):
-        self.root.mainloop()
+        _run_modal(self.root)
 
     @classmethod
     def ask(cls, folder_name: str):
@@ -1699,7 +1780,7 @@ class RecoveryDialog:
             self.root.destroy()
 
     def _run(self):
-        self.root.mainloop()
+        _run_modal(self.root)
 
     @classmethod
     def show(cls, code: str) -> None:
@@ -1753,7 +1834,7 @@ class MessageDialog:
         self.root.destroy()
 
     def _run(self):
-        self.root.mainloop()
+        _run_modal(self.root)
 
     @classmethod
     def error(cls, text: str, title: str = "FolderLocker") -> None:
@@ -2647,15 +2728,18 @@ def do_install(ux: UxContext) -> None:
         except Exception as exc:
             ux.error(f"Could not copy executable to {INSTALL_EXE}:\n  {exc}")
         manager_cmd = [str(INSTALL_EXE), "manage", "--gui"]
-        uninstall_cmd = f'"{INSTALL_EXE}" --uninstall'
+        # --gui so Settings' Uninstall runs through dialogs (it has no console,
+        # so a console prompt would crash with "lost sys.stdin").
+        uninstall_cmd = f'"{INSTALL_EXE}" --uninstall --gui'
         display_icon = str(INSTALL_EXE)
     else:
         pythonw = Path(sys.executable).with_name("pythonw.exe")
         runner = str(pythonw) if pythonw.exists() else sys.executable
         script = os.path.abspath(__file__)
         manager_cmd = [runner, script, "manage", "--gui"]
-        # Use plain python.exe for uninstall so output is visible in a console.
-        uninstall_cmd = f'"{sys.executable}" "{script}" --uninstall'
+        # pythonw + --gui: Settings launches this with no console, so it must
+        # use dialogs, not input().
+        uninstall_cmd = f'"{runner}" "{script}" --uninstall --gui'
         display_icon = ""
 
     # 2. Write the cascading context-menu registry tree under HKCU.
@@ -2840,18 +2924,28 @@ def _manager_gui(rows: list[dict], ux: UxContext) -> None:
     root.resizable(True, True)
     root.minsize(680, 380)
 
+    # Dialogs opened from the Manager should sit above this window.
+    global _ACTIVE_PARENT
+    _ACTIVE_PARENT = root
+
     _header(root, ttk, "🔒", "FolderLocker",
             "Your vaults — select one and unlock it")
 
     body = ttk.Frame(root, style="TFrame")
     body.pack(fill="both", expand=True, padx=20, pady=18)
 
-    # Treeview inside a thin card border.
+    # Pack the button row FIRST, anchored to the bottom, so it always stays
+    # visible no matter how tall the vault list grows.  (A treeview packed with
+    # expand=True before the buttons would otherwise push them off-screen.)
+    btns = ttk.Frame(body, style="TFrame")
+    btns.pack(side="bottom", fill="x", pady=(16, 0))
+
+    # Treeview inside a thin card border (fills the space above the buttons).
     card = tk.Frame(body, bg=_THEME["card"], highlightbackground=_THEME["border"],
                     highlightthickness=1)
-    card.pack(fill="both", expand=True)
+    card.pack(side="top", fill="both", expand=True)
     cols = ("name", "status", "visibility", "path")
-    tree = ttk.Treeview(card, columns=cols, show="headings", height=10)
+    tree = ttk.Treeview(card, columns=cols, show="headings", height=8)
     headings = {"name": "Name", "status": "Status",
                 "visibility": "Visibility", "path": "Location"}
     for c, w in (("name", 190), ("status", 90), ("visibility", 90), ("path", 320)):
@@ -2892,17 +2986,11 @@ def _manager_gui(rows: list[dict], ux: UxContext) -> None:
         if row["status"] == "unlocked":
             MessageDialog.info(f"'{row['name']}' is already unlocked.")
             return
-        root.withdraw()
         try:
             ux._verb = "Unlock"
             cmd_unlock(row["path"], "", ux)
         except AbortAction:
             pass
-        finally:
-            try:
-                root.deiconify()
-            except Exception:
-                pass
         refresh()
 
     def do_full_unlock(_evt=None):
@@ -2921,17 +3009,11 @@ def _manager_gui(rows: list[dict], ux: UxContext) -> None:
             "Fully Unlock?",
         ):
             return
-        root.withdraw()
         try:
             ux._verb = "Fully Unlock"
             cmd_unlock_f(row["path"], "", ux)
         except AbortAction:
             pass
-        finally:
-            try:
-                root.deiconify()
-            except Exception:
-                pass
         refresh()
 
     def do_recover(_evt=None):
@@ -2948,16 +3030,10 @@ def _manager_gui(rows: list[dict], ux: UxContext) -> None:
         if creds is None:
             return
         code, new_pw = creds
-        root.withdraw()
         try:
             cmd_recover(row["path"], code, new_pw, ux)
         except AbortAction:
             pass
-        finally:
-            try:
-                root.deiconify()
-            except Exception:
-                pass
         refresh()
 
     def do_forget(_evt=None):
@@ -2985,23 +3061,15 @@ def _manager_gui(rows: list[dict], ux: UxContext) -> None:
             "Confirm permanent deletion",
         ):
             return
-        root.withdraw()
         try:
             cmd_forget(row["path"], ux, delete_files=True)
         except AbortAction:
             pass
-        finally:
-            try:
-                root.deiconify()
-            except Exception:
-                pass
         refresh()
 
     tree.bind("<Double-1>", do_unlock)
     refresh()
 
-    btns = ttk.Frame(body, style="TFrame")
-    btns.pack(fill="x", pady=(16, 0))
     _button(btns, "🔓  Unlock", do_unlock, kind="accent").pack(side="left")
     _button(btns, "Fully Unlock", do_full_unlock, kind="ghost").pack(
         side="left", padx=(8, 0))
@@ -3011,7 +3079,14 @@ def _manager_gui(rows: list[dict], ux: UxContext) -> None:
     _button(btns, "🗑  Delete", do_forget, kind="danger").pack(side="right")
     _button(btns, "Close", root.destroy, kind="ghost").pack(side="right", padx=(0, 8))
 
-    root.mainloop()
+    # The Manager is a Toplevel of the shared hidden root; run that root's loop
+    # and stop it when the Manager window closes.
+    parent = _get_root()
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    root.bind("<Destroy>", lambda e: parent.quit() if e.widget is root else None)
+    root.lift()
+    root.focus_force()
+    parent.mainloop()
 
 # ── CLI entry point ───────────────────────────────────────────────────────────
 

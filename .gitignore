@@ -3,10 +3,13 @@ __pycache__/
 *.pyc
 *.pyo
 
-# PyInstaller build output
+# PyInstaller / Nuitka build output
 build/
 dist/
 *.spec
+locker.build/
+locker.dist/
+locker.onefile-build/
 
 # Local test / scratch
 test_out.txt

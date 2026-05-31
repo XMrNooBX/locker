@@ -1,9 +1,11 @@
 name: Build & Release
 
-# Builds locker.exe on a clean GitHub-hosted Windows runner and publishes it as
-# a release whenever you push a version tag like v1.0.0.  Because the build runs
-# from the public source on a fresh VM, the binary is reproducible from what
-# everyone can see — no hidden steps.
+# Builds locker.exe with Nuitka on a clean GitHub-hosted Windows runner and
+# publishes it as a release whenever you push a version tag like v1.0.0.
+# Nuitka compiles Python to C/machine code, which triggers fewer antivirus
+# false-positives than a PyInstaller bundle.  Because the build runs from the
+# public source on a fresh VM, the binary is reproducible from what everyone
+# can see — no hidden steps.
 
 on:
   push:
@@ -37,15 +39,30 @@ jobs:
         shell: cmd
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller cryptography argon2-cffi psutil
+          pip install nuitka cryptography argon2-cffi psutil
 
       - name: Run tests
         shell: cmd
         run: python test_context_menu.py
 
-      - name: Build locker.exe
+      - name: Build locker.exe (Nuitka)
         shell: cmd
-        run: python -m PyInstaller --onefile --noconsole --icon locker.ico --name locker --add-data "locker.ico;." locker.py --noconfirm
+        run: >
+          python -m nuitka
+          --onefile
+          --windows-console-mode=disable
+          --enable-plugin=tk-inter
+          --windows-icon-from-ico=locker.ico
+          --include-data-files=locker.ico=locker.ico
+          --company-name=FolderLocker
+          --product-name=FolderLocker
+          --file-version=1.0.1
+          --product-version=1.0.1
+          --file-description="FolderLocker - encrypt and lock folders"
+          --assume-yes-for-downloads
+          --output-filename=locker.exe
+          --output-dir=dist
+          locker.py
 
       - name: Compute SHA-256 checksum
         shell: pwsh
@@ -82,11 +99,10 @@ jobs:
 
             ### Heads-up
             This exe is **not code-signed**, so SmartScreen may warn and some
-            antivirus may flag it (a known false positive for unsigned Python
-            crypto apps). It was built by GitHub Actions directly from this
-            tagged source — see the build log for this run. Upload it to
-            https://www.virustotal.com/ if you want a second opinion, or run
-            from source instead.
+            antivirus may flag it. It was compiled with Nuitka by GitHub Actions
+            directly from this tagged source — see the build log for this run.
+            Upload it to https://www.virustotal.com/ if you want a second
+            opinion, or run from source instead.
 
             See the [CHANGELOG](https://github.com/XMrNooBX/locker/blob/main/CHANGELOG.md)
             for what's new.

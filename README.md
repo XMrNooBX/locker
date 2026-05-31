@@ -155,16 +155,33 @@ A password needs at least **6 characters** with an uppercase letter, a lowercase
 
 ## For maintainers — building the .exe
 
+The release `locker.exe` is built with **Nuitka** (compiles Python to C, which
+triggers fewer antivirus false-positives than a PyInstaller bundle). The easiest
+way is the bundled script:
+
 ```bat
-pip install pyinstaller
-pyinstaller --onefile --noconsole --icon locker.ico --name locker locker.py
+build.bat
 ```
 
-`--noconsole` keeps it from flashing a console window. Run the test suite with:
+Or manually:
+
+```bat
+pip install nuitka cryptography argon2-cffi psutil
+python -m nuitka --onefile --windows-console-mode=disable --enable-plugin=tk-inter ^
+    --windows-icon-from-ico=locker.ico --include-data-files=locker.ico=locker.ico ^
+    --assume-yes-for-downloads --output-filename=locker.exe --output-dir=dist locker.py
+```
+
+Nuitka needs a C compiler; on Windows it uses MSVC if present, otherwise it
+offers to download MinGW automatically. Builds take a few minutes. Run the test
+suite with:
 
 ```bat
 python test_context_menu.py
 ```
+
+> Note: Nuitka does **not** remove the SmartScreen warning — only code signing
+> does. It just reduces antivirus false-positives.
 
 ---
 
@@ -173,7 +190,7 @@ python test_context_menu.py
 | Problem | Fix |
 |---------|-----|
 | Windows SmartScreen blocked it | Click **More info → Run anyway** (it's unsigned — see [Install](#install)), or run from source |
-| Antivirus flagged it | Known false positive for unsigned PyInstaller crypto apps — check the release's VirusTotal link, or run from source |
+| Antivirus flagged it | Possible false positive for an unsigned binary — check the release's VirusTotal link, or run from source |
 | No right-click menu | Run `locker.exe --install` once |
 | A black console window flickered before | Reinstall — newer versions launch silently |
 | Can't find a hidden folder | Open the Manager (Start menu → FolderLocker) |

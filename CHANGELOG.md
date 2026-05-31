@@ -5,7 +5,23 @@ All notable changes to FolderLocker are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
-## [1.0.0] — Unreleased
+## [1.0.1] — Unreleased
+
+Bug-fix release focused on the GUI Manager and uninstall flow.
+
+### Fixed
+- Manager dialogs (Unlock / Fully Unlock / Reset / Delete) no longer flash and
+  vanish — all windows now share one Tk root and dialogs stay above the Manager.
+- Uninstalling from Settings → Apps no longer crashes with "lost sys.stdin"
+  (the uninstall command now runs in GUI mode).
+- Manager action buttons are always visible regardless of vault-list length.
+
+### Changed
+- The released `locker.exe` is now built with **Nuitka** (compiled to C) instead
+  of PyInstaller, which reduces antivirus false-positives.
+- Console output is forced to UTF-8 so it never crashes on a legacy code page.
+
+## [1.0.0]
 
 First public release.
 
@@ -41,4 +57,5 @@ First public release.
 - Documented threat model: protects data at rest; does **not** protect against
   an admin/malware on a live account while a folder is unlocked.
 
-[1.0.0]: https://github.com/XMrNooBX/locker/releases
+[1.0.1]: https://github.com/XMrNooBX/locker/releases/tag/v1.0.1
+[1.0.0]: https://github.com/XMrNooBX/locker/releases/tag/v1.0.0
