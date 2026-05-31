@@ -223,8 +223,12 @@ def test_visible_lock_cycle():
         state = locker.load_state()
         _, vault = locker.find_vault(state, secret)
         check("vault recorded hidden=False", vault and vault.get("hidden") is False)
+        # For a visible lock the folder is not renamed, so locked_path must
+        # equal original_path. Compare the two stored fields (both resolved the
+        # same way) rather than the test's raw path, which can differ from the
+        # resolved form on some systems (e.g. CI temp dirs with 8.3 names).
         check("locked_path == original_path for visible lock",
-              vault and vault["locked_path"] == str(secret))
+              vault and vault["locked_path"] == vault["original_path"])
         check("vault status locked after lock", vault and vault["status"] == "locked")
 
         # Unlock: restores plaintext (the round-trip proves real encryption).
