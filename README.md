@@ -68,11 +68,11 @@ No administrator rights needed. To update later, download the newer `locker.exe`
 
 To remove it: **Settings → Apps → Installed apps → FolderLocker → Uninstall**, or run `locker.exe --uninstall`.
 
-> **About the security warning:** FolderLocker is not code-signed (signing certificates are expensive for a free project), so Windows SmartScreen may say *"Windows protected your PC"* and some antivirus tools may flag it. This is a known **false positive** for unsigned Python apps that do encryption — the code is fully open, and each release links a VirusTotal scan. If you'd rather not run an unsigned exe, use the **run from source** option below instead.
+> **About the security warning:** FolderLocker is not code-signed (signing certificates are expensive for a free project), so Windows SmartScreen may say *"Windows protected your PC"* and some antivirus tools may flag it. This is a common **false positive** for unsigned binaries — the code is fully open and the exe is built by GitHub Actions straight from the tagged source. If you'd like a second opinion, upload it to [VirusTotal](https://www.virustotal.com/); if you'd rather not run an unsigned exe at all, use the **run from source** option below.
 
 ### Verifying your download
 
-Each release lists a **SHA-256 checksum** and a **VirusTotal scan link**. To check the file matches:
+Each release attaches a **SHA-256 checksum** (`locker.exe.sha256`). To check the file matches:
 
 ```powershell
 Get-FileHash .\locker.exe -Algorithm SHA256
@@ -104,6 +104,10 @@ Right-click any folder → **Locker** →
 | **Fully Unlock** | Unlocks it permanently and removes it from FolderLocker — back to a totally normal folder. |
 
 When you lock a folder for the first time, you'll set a password and be shown your **recovery key** — save it.
+
+> **Lock vs Lock & Hide:** both encrypt your files with AES-256 — the contents are equally protected either way. "Lock & Hide" *also* conceals the folder from Explorer; it's not stronger encryption, just less visible. Hidden folders are reached through the Manager (below).
+>
+> All four items always show in the menu. If one doesn't apply (e.g. unlocking a folder that isn't locked), FolderLocker just tells you instead of doing nothing.
 
 ### Finding hidden folders — the Manager
 
