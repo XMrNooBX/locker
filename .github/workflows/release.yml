@@ -1,0 +1,85 @@
+name: Build & Release
+
+# Builds locker.exe on a clean GitHub-hosted Windows runner and publishes it as
+# a release whenever you push a version tag like v1.0.0.  Because the build runs
+# from the public source on a fresh VM, the binary is reproducible from what
+# everyone can see — no hidden steps.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:        # allow manual runs from the Actions tab
+
+permissions:
+  contents: write           # needed to create the release
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller cryptography argon2-cffi psutil
+
+      - name: Run tests
+        run: python test_context_menu.py
+
+      - name: Build locker.exe
+        run: >
+          pyinstaller --onefile --noconsole --icon locker.ico --name locker
+          --add-data "locker.ico;." locker.py
+
+      - name: Compute SHA-256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist/locker.exe -Algorithm SHA256).Hash
+          "$hash  locker.exe" | Out-File -Encoding ascii dist/locker.exe.sha256
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: locker-exe
+          path: |
+            dist/locker.exe
+            dist/locker.exe.sha256
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/locker.exe
+            dist/locker.exe.sha256
+          body: |
+            ## FolderLocker ${{ github.ref_name }}
+
+            **Download `locker.exe` below, then run it once to install.**
+
+            ### Verify your download
+            ```powershell
+            Get-FileHash .\locker.exe -Algorithm SHA256
+            ```
+            Compare the result to `locker.exe.sha256` (also attached).
+
+            ### Heads-up
+            This exe is **not code-signed**, so SmartScreen may warn and some
+            antivirus may flag it (a known false positive for unsigned Python
+            crypto apps). It was built by GitHub Actions directly from this
+            tagged source — see the build log for this run. Upload it to
+            https://www.virustotal.com/ if you want a second opinion, or run
+            from source instead.
+
+            See the [CHANGELOG](https://github.com/XMrNooBX/locker/blob/main/CHANGELOG.md)
+            for what's new.
