@@ -317,6 +317,21 @@ def _enable_ansi() -> None:
     except Exception:
         pass
 
+
+def _force_utf8_stdio() -> None:
+    """
+    Reconfigure stdout/stderr to UTF-8 so the Unicode UI (✓, box-drawing,
+    emoji) never crashes with UnicodeEncodeError on consoles that default to a
+    legacy code page (e.g. cp1252 on plain cmd or CI runners).  errors='replace'
+    is a belt-and-braces fallback so a print can never abort the program.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+_force_utf8_stdio()
 _enable_ansi()
 
 # ── Output helpers ────────────────────────────────────────────────────────────

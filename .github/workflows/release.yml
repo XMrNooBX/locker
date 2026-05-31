@@ -14,6 +14,12 @@ on:
 permissions:
   contents: write           # needed to create the release
 
+env:
+  # Force UTF-8 so the tool's Unicode console output never crashes on the
+  # runner's default code page.
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
   build:
     runs-on: windows-latest
