@@ -91,7 +91,7 @@ REG_MENU_LABEL = "Locker"
 # tool appears in Settings → Apps with a working Uninstall button (per-user, no
 # admin).  HKCU\…\Uninstall\FolderLocker
 REG_UNINSTALL  = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\FolderLocker"
-APP_VERSION    = "1.0.2"
+APP_VERSION    = "1.0.3"
 
 # Argon2id — OWASP-compliant, lighter than v1 params (~2× faster)
 ARGON2_TIME_COST   = 2

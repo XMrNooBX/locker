@@ -56,8 +56,8 @@ jobs:
           --include-data-files=locker.ico=locker.ico
           --company-name=FolderLocker
           --product-name=FolderLocker
-          --file-version=1.0.2
-          --product-version=1.0.2
+          --file-version=1.0.3
+          --product-version=1.0.3
           --file-description="FolderLocker - encrypt and lock folders"
           --assume-yes-for-downloads
           --output-filename=locker.exe

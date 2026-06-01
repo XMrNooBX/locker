@@ -5,7 +5,24 @@ All notable changes to FolderLocker are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
-## [1.0.2] — Unreleased
+## [1.0.3] — Unreleased
+
+Bug-fix release: smooths out the GUI so it never looks frozen or scary.
+
+### Fixed
+- **A console window flashed on every action; unlocking sometimes showed an
+  `icacls.exe — Application Error (0xc0000142)` dialog.** The filesystem helpers
+  (`icacls`, `attrib`, `takeown`) now run hidden (`CREATE_NO_WINDOW` + hidden
+  `STARTUPINFO`, no inherited handles) and transient `0xc0000142`
+  (`STATUS_DLL_INIT_FAILED`) failures are retried, so no console flickers and the
+  spurious error dialog is gone.
+- **The Manager froze ("Not Responding") with no feedback after clicking
+  Unlock / Lock / Reset / Delete.** The heavy steps — Argon2id key derivation
+  and the recursive ACL/attribute changes — used to run on the UI thread. They
+  now run on a background thread behind an animated "working…" window, so the
+  app stays responsive and always shows what it is doing.
+
+## [1.0.2]
 
 Bug-fix release: makes the packaged (Nuitka) build actually work end-to-end.
 
@@ -20,17 +37,6 @@ Bug-fix release: makes the packaged (Nuitka) build actually work end-to-end.
   `wait_window()`, which was unreliable as the first window in a windowed exe.
 - **Double-clicking the exe to install showed a dialog that flashed away.**
   First-run now opens a proper install window.
-- **A console window flashed on every action; unlocking sometimes showed an
-  `icacls.exe — Application Error (0xc0000142)` dialog.** The filesystem helpers
-  (`icacls`, `attrib`, `takeown`) now run hidden (`CREATE_NO_WINDOW` + hidden
-  `STARTUPINFO`, no inherited handles) and transient `0xc0000142`
-  (`STATUS_DLL_INIT_FAILED`) failures are retried, so no console flickers and the
-  spurious error dialog is gone.
-- **The Manager froze ("Not Responding") with no feedback after clicking
-  Unlock / Lock / Reset / Delete.** The heavy steps — Argon2id key derivation
-  and the recursive ACL/attribute changes — used to run on the UI thread. They
-  now run on a background thread behind an animated "working…" window, so the
-  app stays responsive and always shows what it is doing.
 
 ## [1.0.1]
 
@@ -84,6 +90,7 @@ First public release.
 - Documented threat model: protects data at rest; does **not** protect against
   an admin/malware on a live account while a folder is unlocked.
 
+[1.0.3]: https://github.com/XMrNooBX/locker/releases/tag/v1.0.3
 [1.0.2]: https://github.com/XMrNooBX/locker/releases/tag/v1.0.2
 [1.0.1]: https://github.com/XMrNooBX/locker/releases/tag/v1.0.1
 [1.0.0]: https://github.com/XMrNooBX/locker/releases/tag/v1.0.0
