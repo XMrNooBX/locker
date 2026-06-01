@@ -128,6 +128,14 @@ FILE_ATTRIBUTE_HIDDEN   = 0x2
 FILE_ATTRIBUTE_SYSTEM   = 0x4
 INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 
+# Spawn console helpers (icacls/attrib/takeown/cmd) with no visible window.
+# Without this, every helper call briefly flashes a console window — and from a
+# windowed (no-console) GUI exe it can intermittently fail to initialise with
+# 0xC0000142 (STATUS_DLL_INIT_FAILED), surfacing the scary
+# "application was unable to start correctly" dialog.
+CREATE_NO_WINDOW        = 0x08000000
+STATUS_DLL_INIT_FAILED  = 0xC0000142
+
 # ── ANSI colours ──────────────────────────────────────────────────────────────
 
 _R  = "\033[0m"
@@ -678,6 +686,37 @@ def unwrap_key(blob: bytes, wrapping: bytes) -> bytes:
     except Exception:
         raise ValueError("Bad wrapping key or corrupted blob.")
 
+
+class BadPassword(ValueError):
+    """Raised by _derive_master_key when the password/recovery code is wrong."""
+
+
+def _derive_master_key(vault: dict, password: str) -> bytes:
+    """
+    Verify the password and return the vault's master key.
+
+    Pure computation (no UI, no global Tk) so it can run on a worker thread via
+    ux.run_blocking().  Raises BadPassword on an incorrect password.  Handles
+    both v2 (key-wrapping) and legacy v1 (argon2_hash) vaults.
+    """
+    if _is_v2(vault):
+        pw_key = derive_key(password, bytes.fromhex(vault["pw_salt"]))
+        try:
+            return unwrap_key(bytes.fromhex(vault["wrapped_pw"]), pw_key)
+        except ValueError:
+            raise BadPassword("Incorrect password.")
+    # Legacy v1 vault (argon2_hash + enc_salt format)
+    _ph = _PH_cls(time_cost=3, memory_cost=65536, parallelism=4)
+    try:
+        _ph.verify(vault["argon2_hash"], password)
+    except Exception:
+        raise BadPassword("Incorrect password.")
+    return hash_secret_raw(
+        secret=password.encode(), salt=bytes.fromhex(vault["enc_salt"]),
+        time_cost=3, memory_cost=65536, parallelism=4, hash_len=32,
+        type=Argon2Type.ID,
+    )
+
 # ── Streaming AES-256-GCM ─────────────────────────────────────────────────────
 #
 # V2 on-disk file format:
@@ -972,8 +1011,44 @@ def _vault_hidden(vault: dict) -> bool:
 
 # ── Windows FS helpers ────────────────────────────────────────────────────────
 
-def _run(cmd: list[str]) -> None:
-    subprocess.run(cmd, capture_output=True, text=True)
+def _no_window_startupinfo():
+    """STARTUPINFO that hides the console window of a spawned helper process."""
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 0   # SW_HIDE
+    return si
+
+
+def _run(cmd: list[str], retries: int = 2) -> subprocess.CompletedProcess:
+    """
+    Run a Windows console helper (icacls/attrib/takeown/cmd) without flashing a
+    console window and without inheriting GUI handles.
+
+    From a windowed (pythonw / Nuitka windowed) host the OS occasionally fails
+    to start a console child with 0xC0000142 (STATUS_DLL_INIT_FAILED).  This is
+    transient, so we retry a couple of times before giving up.  The call is
+    best-effort: callers already tolerate failure, and never surface this exit
+    code to the user.
+    """
+    last = None
+    for attempt in range(retries + 1):
+        try:
+            last = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
+                startupinfo=_no_window_startupinfo(),
+            )
+        except Exception:
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+        # 0xC0000142 comes back as a signed/large return code; retry it.
+        rc = last.returncode & 0xFFFFFFFF if last.returncode is not None else 0
+        if rc != STATUS_DLL_INIT_FAILED:
+            return last
+        time.sleep(0.15 * (attempt + 1))
+    return last if last is not None else subprocess.CompletedProcess(cmd, 1, "", "")
 
 def attrib_hide(p: Path) -> None:
     attrs = _k32.GetFileAttributesW(str(p))
@@ -1000,6 +1075,12 @@ def icacls_restore(p: Path) -> None:
 def apply_lock_fs(p: Path) -> None:
     attrib_hide(p)
     icacls_deny(p)
+
+def _lock_and_hide_fs(orig: Path, locked_path: Path) -> None:
+    """Rename a folder to its hidden vault name then apply the deny ACL.
+    Pure filesystem work — safe to run off the UI thread via run_blocking()."""
+    orig.rename(locked_path)
+    apply_lock_fs(locked_path)
 
 def apply_lock_fs_visible(p: Path) -> None:
     """
@@ -1146,6 +1227,19 @@ class UxContext:
     def progress_factory(self):
         """Return a callable usable as encrypt_folder(progress_factory=…)."""
         return self.make_progress
+
+    def run_blocking(self, label: str, fn, *args, **kwargs):
+        """
+        Run a blocking, non-UI callable (key derivation, ACL changes, deletes)
+        and return its result.
+
+        The base/console implementation prints the label then calls it.  The
+        GUI overrides this to run fn on a worker thread while keeping the window
+        responsive and showing an animated "working" indicator, so long
+        operations never make the UI freeze ("Not Responding").
+        """
+        self.info(label.rstrip("…").rstrip(".") + "...")
+        return fn(*args, **kwargs)
 
     def error(self, msg: str) -> NoReturn:
         """Report an error then abort the action."""
@@ -1885,6 +1979,62 @@ class MessageDialog:
         return dlg.answer
 
 
+class BusyDialog:
+    """
+    Small animated "working…" window shown while a blocking, non-UI step runs
+    on a background thread (key derivation, ACL/attribute changes, folder
+    renames, deletes).  An indeterminate progress bar keeps the user informed
+    so the app never looks frozen, and Windows never marks it "Not Responding".
+
+    Use via run_blocking() on the GuiUx — do not touch Tk from the worker
+    thread; only the main thread pumps this window.
+    """
+
+    def __init__(self, label: str, accent: str = None):
+        accent = accent or _THEME["accent"]
+        self.tk, self.ttk, self.root, _ = _make_root("FolderLocker", 380, 150, accent)
+        ttk = self.ttk
+        _header(self.root, ttk, "⏳", label, "", accent)
+
+        body = ttk.Frame(self.root, style="TFrame")
+        body.pack(fill="both", expand=True, padx=24, pady=20)
+        self.pbar = ttk.Progressbar(body, mode="indeterminate",
+                                    style="Accent.Horizontal.TProgressbar")
+        self.pbar.pack(fill="x", pady=(4, 10))
+        self.stat = ttk.Label(body, text="Please wait…", style="Muted.TLabel")
+        self.stat.pack(anchor="w")
+
+        self.root.protocol("WM_DELETE_WINDOW", lambda: None)  # block manual close
+        try:
+            self.pbar.start(12)
+        except Exception:
+            pass
+        try:
+            self.root.transient(_ACTIVE_PARENT if _ACTIVE_PARENT else None)
+            self.root.lift()
+            self.root.update_idletasks()
+            self.root.update()
+        except Exception:
+            pass
+
+    def pump(self) -> None:
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except Exception:
+            pass
+
+    def finish(self) -> None:
+        try:
+            self.pbar.stop()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+
 class ProgressDialog:
     """
     GUI progress window matching the _Bar interface (.tick/.file_done/.finish).
@@ -1978,6 +2128,40 @@ class GuiUx(UxContext):
     def make_progress(self, total_files, total_bytes, label, colour):
         return ProgressDialog(total_files, total_bytes, label, colour)
 
+    def run_blocking(self, label: str, fn, *args, **kwargs):
+        """
+        Run fn(*args, **kwargs) on a worker thread while keeping the GUI alive.
+
+        The heavy steps in lock/unlock — Argon2id key derivation and the
+        recursive icacls/attrib/takeown ACL changes — can take several seconds
+        and used to run on the Tk main thread, freezing the window (Windows
+        showed "Not Responding") with no feedback after a click.  Here the main
+        thread shows an animated BusyDialog and pumps Tk events while the work
+        happens off-thread.
+        """
+        busy = BusyDialog(label)
+        result = {}
+
+        def _target():
+            try:
+                result["value"] = fn(*args, **kwargs)
+            except BaseException as exc:   # re-raised on the main thread below
+                result["error"] = exc
+
+        worker = threading.Thread(target=_target, daemon=True)
+        worker.start()
+        try:
+            while worker.is_alive():
+                busy.pump()
+                time.sleep(0.03)
+            busy.pump()
+        finally:
+            busy.finish()
+
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
+
     def error(self, msg: str) -> NoReturn:
         MessageDialog.error(msg)
         raise AbortAction(msg)
@@ -2013,16 +2197,20 @@ def cmd_lock(folder: str, password: str, ux: UxContext, *, hide: bool) -> None:
             ux.error("Re-lock failed: master key missing from state.")
         ux.info(f"Re-locking '{orig.name}'...")
         encrypt_folder(orig, bytes.fromhex(uk), progress_factory=ux.progress_factory())
-        if was_hidden:
-            if locked.exists() and locked != orig:
-                # Leftover from an interrupted previous re-lock — remove it
-                # so rename succeeds (Windows does not allow rename-over-dir).
-                shutil.rmtree(locked, ignore_errors=True)
-            if orig != locked:
-                orig.rename(locked)
-            apply_lock_fs(locked)
-        else:
-            apply_lock_fs_visible(locked)
+
+        def _relock_fs():
+            if was_hidden:
+                if locked.exists() and locked != orig:
+                    # Leftover from an interrupted previous re-lock — remove it
+                    # so rename succeeds (Windows does not allow rename-over-dir).
+                    shutil.rmtree(locked, ignore_errors=True)
+                if orig != locked:
+                    orig.rename(locked)
+                apply_lock_fs(locked)
+            else:
+                apply_lock_fs_visible(locked)
+
+        ux.run_blocking("Locking…", _relock_fs)
         vault["status"] = "locked"
         vault["unlock_key"] = None
         save_state(state)
@@ -2074,22 +2262,27 @@ def cmd_lock(folder: str, password: str, ux: UxContext, *, hide: bool) -> None:
     master_key  = os.urandom(32)    # encrypts files — never changes
     pw_salt     = os.urandom(32)
     rec_salt    = os.urandom(32)
-    pw_key      = derive_key(password, pw_salt)
     rec_code    = gen_recovery_code()
-    rec_key     = derive_rec_key(rec_code, rec_salt)
-    wrapped_pw  = wrap_key(master_key, pw_key)
-    wrapped_rec = wrap_key(master_key, rec_key)
+
+    def _wrap_keys():
+        pw_key      = derive_key(password, pw_salt)
+        rec_key     = derive_rec_key(rec_code, rec_salt)
+        return wrap_key(master_key, pw_key), wrap_key(master_key, rec_key)
+
+    # Argon2id derivation is CPU-heavy — run it off the UI thread.
+    wrapped_pw, wrapped_rec = ux.run_blocking(
+        "Preparing encryption keys…", _wrap_keys)
 
     ux.info(f"Encrypting '{target.name}'...")
     encrypt_folder(target, master_key, progress_factory=ux.progress_factory())
 
     if hide:
         ux.info("Locking and hiding...")
-        target.rename(locked_path)
-        apply_lock_fs(locked_path)
+        ux.run_blocking("Locking and hiding…", _lock_and_hide_fs,
+                        target, locked_path)
     else:
         ux.info("Locking...")
-        apply_lock_fs_visible(locked_path)
+        ux.run_blocking("Locking…", apply_lock_fs_visible, locked_path)
 
     state["vaults"][str(target)] = {
         "version":       VAULT_VER,
@@ -2143,36 +2336,27 @@ def cmd_unlock(folder: str, password: str, ux: UxContext) -> None:
         if password is None:
             raise AbortAction("cancelled")
 
-    ux.info("Verifying password...")
-    if _is_v2(vault):
-        pw_key = derive_key(password, bytes.fromhex(vault["pw_salt"]))
-        try:
-            master_key = unwrap_key(bytes.fromhex(vault["wrapped_pw"]), pw_key)
-        except ValueError:
-            ux.error("Incorrect password.")
-    else:
-        # Legacy v1 vault (argon2_hash + enc_salt format)
-        _ph = _PH_cls(time_cost=3, memory_cost=65536, parallelism=4)
-        try:
-            _ph.verify(vault["argon2_hash"], password)
-        except Exception:
-            ux.error("Incorrect password.")
-        ux.info("Deriving decryption key (legacy v1 vault)...")
-        master_key = hash_secret_raw(
-            secret=password.encode(), salt=bytes.fromhex(vault["enc_salt"]),
-            time_cost=3, memory_cost=65536, parallelism=4, hash_len=32,
-            type=Argon2Type.ID,
-        )
+    # Argon2id derivation is CPU-heavy; run it off the UI thread with a busy
+    # indicator so the window stays responsive (no "Not Responding").
+    try:
+        master_key = ux.run_blocking(
+            "Verifying password…", _derive_master_key, vault, password)
+    except BadPassword:
+        ux.error("Incorrect password.")
 
     if not locked.exists():
         ux.error(f"Locked folder not found: {locked}")
     if was_hidden and orig.exists() and orig != locked:
         ux.error(f"Cannot restore: '{orig.name}' already exists at that location.")
 
-    ux.info("Restoring access...")
-    apply_unlock_fs(locked)
-    if was_hidden and locked != orig:
-        locked.rename(orig)
+    # Restoring access runs a recursive icacls/attrib pass that can take a few
+    # seconds on large trees — also off the UI thread.
+    def _restore():
+        apply_unlock_fs(locked)
+        if was_hidden and locked != orig:
+            locked.rename(orig)
+
+    ux.run_blocking("Restoring access…", _restore)
 
     # Save state as "unlocked" BEFORE decryption starts so that if we
     # crash midway, the daemon (or next startup) knows the vault is
@@ -2211,25 +2395,12 @@ def cmd_unlock_f(folder: str, password: str, ux: UxContext) -> None:
         if password is None:
             raise AbortAction("cancelled")
 
-    ux.info("Verifying password...")
-    if _is_v2(vault):
-        pw_key = derive_key(password, bytes.fromhex(vault["pw_salt"]))
-        try:
-            master_key = unwrap_key(bytes.fromhex(vault["wrapped_pw"]), pw_key)
-        except ValueError:
-            ux.error("Incorrect password.")
-    else:
-        _ph = _PH_cls(time_cost=3, memory_cost=65536, parallelism=4)
-        try:
-            _ph.verify(vault["argon2_hash"], password)
-        except Exception:
-            ux.error("Incorrect password.")
-        ux.info("Deriving decryption key (legacy v1 vault)...")
-        master_key = hash_secret_raw(
-            secret=password.encode(), salt=bytes.fromhex(vault["enc_salt"]),
-            time_cost=3, memory_cost=65536, parallelism=4, hash_len=32,
-            type=Argon2Type.ID,
-        )
+    # Argon2id derivation off the UI thread (keeps the window responsive).
+    try:
+        master_key = ux.run_blocking(
+            "Verifying password…", _derive_master_key, vault, password)
+    except BadPassword:
+        ux.error("Incorrect password.")
 
     if locked.exists():
         cur = locked
@@ -2245,8 +2416,10 @@ def cmd_unlock_f(folder: str, password: str, ux: UxContext) -> None:
         master_key = bytes.fromhex(uk)   # use cached key
 
     ux.info("Restoring filesystem access...")
-    icacls_restore(cur)
-    attrib_show(cur)
+    def _restore_f():
+        icacls_restore(cur)
+        attrib_show(cur)
+    ux.run_blocking("Restoring access…", _restore_f)
 
     if needs_rename:
         if orig.exists():
@@ -2321,7 +2494,9 @@ def cmd_forget(folder: str, ux: UxContext, *, delete_files: bool) -> None:
         if cur is not None:
             ux.info(f"Permanently deleting '{name}'...")
             try:
-                _force_delete_dir(cur)
+                # takeown + recursive icacls + rmtree can take a while — run it
+                # off the UI thread so the window stays responsive.
+                ux.run_blocking(f"Deleting '{name}'…", _force_delete_dir, cur)
             except Exception as exc:
                 ux.error(f"Could not delete the folder:\n  {cur}\n\n{exc}\n\n"
                          f"The registry entry was left intact.")
@@ -2386,13 +2561,18 @@ def cmd_recover(folder: str, code: str, new_pw: str, ux: UxContext) -> None:
 
     ux.info("Generating new password key (Argon2id)...")
     new_pw_salt    = os.urandom(32)
-    new_pw_key     = derive_key(new_pw, new_pw_salt)
-    new_wrapped_pw = wrap_key(master_key, new_pw_key)
+    new_rec_salt   = os.urandom(32)
+    new_rec_code   = gen_recovery_code()
 
-    new_rec_salt    = os.urandom(32)
-    new_rec_code    = gen_recovery_code()
-    new_rec_key     = derive_rec_key(new_rec_code, new_rec_salt)
-    new_wrapped_rec = wrap_key(master_key, new_rec_key)
+    def _rewrap():
+        new_pw_key      = derive_key(new_pw, new_pw_salt)
+        new_rec_key     = derive_rec_key(new_rec_code, new_rec_salt)
+        return (wrap_key(master_key, new_pw_key),
+                wrap_key(master_key, new_rec_key))
+
+    # Argon2id derivation off the UI thread.
+    new_wrapped_pw, new_wrapped_rec = ux.run_blocking(
+        "Updating password…", _rewrap)
 
     vault["pw_salt"]     = new_pw_salt.hex()
     vault["wrapped_pw"]  = new_wrapped_pw.hex()
@@ -2764,6 +2944,9 @@ def _create_shortcut(target_cmd: list[str]) -> bool:
             ["powershell", "-NoProfile", "-NonInteractive",
              "-ExecutionPolicy", "Bypass", "-Command", ps],
             capture_output=True, text=True, timeout=20,
+            stdin=subprocess.DEVNULL,
+            creationflags=CREATE_NO_WINDOW,
+            startupinfo=_no_window_startupinfo(),
         )
         return SHORTCUT_PATH.exists()
     except Exception:

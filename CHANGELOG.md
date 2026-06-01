@@ -20,6 +20,17 @@ Bug-fix release: makes the packaged (Nuitka) build actually work end-to-end.
   `wait_window()`, which was unreliable as the first window in a windowed exe.
 - **Double-clicking the exe to install showed a dialog that flashed away.**
   First-run now opens a proper install window.
+- **A console window flashed on every action; unlocking sometimes showed an
+  `icacls.exe — Application Error (0xc0000142)` dialog.** The filesystem helpers
+  (`icacls`, `attrib`, `takeown`) now run hidden (`CREATE_NO_WINDOW` + hidden
+  `STARTUPINFO`, no inherited handles) and transient `0xc0000142`
+  (`STATUS_DLL_INIT_FAILED`) failures are retried, so no console flickers and the
+  spurious error dialog is gone.
+- **The Manager froze ("Not Responding") with no feedback after clicking
+  Unlock / Lock / Reset / Delete.** The heavy steps — Argon2id key derivation
+  and the recursive ACL/attribute changes — used to run on the UI thread. They
+  now run on a background thread behind an animated "working…" window, so the
+  app stays responsive and always shows what it is doing.
 
 ## [1.0.1]
 
